@@ -1,13 +1,14 @@
 {
   "slug": "grab-it",
   "name": "GrabIt",
-  "tagline": "A multi-threaded download manager \u2014 segmented downloads, resume and a queue.",
+  "tagline": "A multi-threaded download manager — segmented downloads, resume and a queue.",
   "categorySlug": "download-managers",
   "license": "Apache-2.0",
   "description": "Download files faster with multi-connection segmented transfers, pause/resume, a queue with scheduling, checksum verification, and batch downloads from a list. Clipboard-watch adds URLs automatically. A clean, open-source download accelerator.",
   "aiStack": "Python (tkinter + CLI), requests",
   "platforms": [
-    "windows"
+    "windows",
+    "linux"
   ],
   "buildEntry": "grab_it_app.py"
 }
