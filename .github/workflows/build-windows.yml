@@ -18,8 +18,10 @@ jobs:
       - name: Build GrabIt.exe
         run: >
           pyinstaller --onefile --windowed --name GrabIt
+          --collect-all customtkinter
           --icon grab-it.ico
           --version-file packaging/version.txt
+          --hidden-import grabit.__main__
           --add-data "grab-it.ico;."
           grab_it_app.py
       - name: Stage installer inputs
@@ -40,4 +42,10 @@ jobs:
           path: |
             dist/GrabIt.exe
             packaging/dist/GrabIt-Setup.exe
+          if-no-files-found: error
+      - name: Upload staging (for signed repack)
+        uses: actions/upload-artifact@v4
+        with:
+          name: grab-it-staging
+          path: packaging/staging
           if-no-files-found: error

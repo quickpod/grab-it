@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-r"""GrabIt -- a pure-stdlib tkinter GUI on top of the ``grabit`` download engine.
+r"""GrabIt -- an Aura (QuickOpen design system) GUI on top of the ``grabit``
+download engine.
 
-A single main window: a top bar to add a URL, a central queue table (name, size,
-progress, speed, state), per-row Pause / Resume / Cancel / Remove controls, a
-concurrency setting and an optional clipboard-watch that auto-adds copied URLs.
-Every download runs on the tested :class:`grabit.Download` engine on background
-threads; the UI refreshes on a light ``self.after`` poll and never blocks.
+A single Aura window: a **Downloads** section with an add-URL bar, the queue
+table (name, size, progress, speed, state) with per-row Pause / Resume /
+Cancel / Remove controls and an overall progress bar; a **Settings** section
+(download folder, concurrency, clipboard-watch); and an **About** section.
+Every download runs on the tested :class:`grabit.Download` engine on
+background threads; the UI refreshes on a light ``self.after`` poll and never
+blocks.
 
-Design goals (mirrored from the QuickOpen house style):
-  * pure standard-library tkinter/ttk -- NO third-party GUI deps.  Dark mode is
-    a ttk-style + palette swap (the QuickOpen palette).
-  * Importing this module does nothing.  Only :func:`main` builds a root window,
-    and it degrades gracefully (prints a message, returns 0) with no display.
-  * Frozen-exe safe: bundled assets are resolved via ``sys._MEIPASS`` / the exe
-    directory when ``sys.frozen`` is set -- never ``__file__``.
+Design goals baked in here (mirrors the QuickOpen house style):
+  * built on the vendored ``grabit/aura.py`` design system, which layers the
+    quickopen.ai look (deep space + light) over CustomTkinter.  Runtime deps:
+    ``customtkinter`` (+ ``darkdetect``) — declared in requirements.txt; the
+    PyInstaller build adds ``--collect-all customtkinter``.
+  * Importing this module does nothing.  Only :func:`main` builds a root
+    window, and it degrades gracefully (prints a message, returns 0) with no
+    display or with customtkinter missing.
+  * Frozen-exe safe: bundled assets are resolved via ``sys._MEIPASS`` / the
+    exe directory when ``sys.frozen`` is set -- never ``__file__``.
+  * Downloads run on background threads; state is polled with ``self.after``
+    and errors surface in the Aura status bar, never as a traceback.
 
 100% AI-built, open source, published on QuickOpen (quickopen.ai).
 """
@@ -23,32 +31,15 @@ from __future__ import annotations
 import os
 import sys
 
-# NOTE: tkinter is imported lazily inside main()/build_app so that merely
-# importing this module (e.g. during packaging or on a headless CI box) never
-# fails and has no side effects.
+# NOTE: tkinter/customtkinter are imported lazily inside main()/build_app so
+# that merely importing this module (e.g. during packaging or on a headless CI
+# box) never fails and has no side effects.
 
 APP_NAME = "GrabIt"
 APP_VERSION = "1.0.0"
 WINDOW_TITLE = "GrabIt — by QuickOpen (quickopen.ai)"
 PROJECT_URL = "https://quickopen.ai"
-
-# ---- colour palettes (mirror the QuickOpen palette) -------------------------
-PALETTES = {
-    "light": {
-        "bg": "#f5f7fa", "surface": "#ffffff", "text": "#141820",
-        "muted": "#5b6472", "primary": "#2f5fe0", "primary_hi": "#2450c8",
-        "entry": "#ffffff", "border": "#d5dae2", "sel": "#2f5fe0",
-        "sel_fg": "#ffffff", "trough": "#e2e7ef", "ok": "#1f7a3d",
-        "err": "#c0392b",
-    },
-    "dark": {
-        "bg": "#0f1115", "surface": "#1a1e24", "text": "#f1f3f7",
-        "muted": "#9aa4b2", "primary": "#5b86f7", "primary_hi": "#7098ff",
-        "entry": "#1a1e24", "border": "#2a2f38", "sel": "#5b86f7",
-        "sel_fg": "#0f1115", "trough": "#2a2f38", "ok": "#5bd68a",
-        "err": "#ff6b5e",
-    },
-}
+ACCENT = "#17914b"      # UI-accent registry (ui/aurakit/README.md): grab-it
 
 
 # ---------------------------------------------------------------------------
@@ -127,22 +118,22 @@ def _looks_like_url(text):
 
 
 # ---------------------------------------------------------------------------
-# The app (built lazily; tkinter imported only inside build_app/main)
+# The app (built lazily; tkinter/customtkinter imported only inside build_app)
 # ---------------------------------------------------------------------------
 def build_app():
-    """Construct and return the App class bound to a live tkinter import.
+    """Construct and return the App class bound to live GUI imports.
 
-    Kept inside a function so this module imports cleanly without a display.
+    Kept inside a function so this module imports cleanly without a display
+    (and without customtkinter installed).
     """
     import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox
+    from tkinter import ttk, filedialog
+    import customtkinter as ctk
 
-    from . import guiconfig
-    from .download import (CANCELLED, DONE, ERROR, PAUSED, QUEUED, RUNNING,
+    from . import aura, guiconfig
+    from .download import (CANCELLED, DONE, PAUSED, QUEUED, RUNNING,
                            Download, filename_from_url)
-    from .errors import GrabItError
 
-    FONT = "Segoe UI"
     POLL_MS = 300  # UI refresh / scheduler tick
 
     COLUMNS = [
@@ -174,26 +165,36 @@ def build_app():
                 return self.dl.state
             return QUEUED if self.requested else PAUSED
 
-    class App(tk.Tk):
+    class App(aura.AuraApp):
         def __init__(self):
-            super().__init__()
-            self.title(WINDOW_TITLE)
-            self.geometry("960x600")
-            self.minsize(760, 460)
+            super().__init__(
+                title=WINDOW_TITLE, app_name=APP_NAME, accent=ACCENT,
+                theme=guiconfig.get_theme(),
+                icon_png=asset_path("grab-it.png"), version=APP_VERSION,
+                tagline="download manager",
+                on_theme_change=guiconfig.set_theme,
+                size=(1080, 680), min_size=(900, 560))
 
-            self.theme = guiconfig.get_theme()
             self.rows = []                       # list[Row]
-            self._img_refs = []
+            self._img_refs_gui = []
             self._last_clip = ""
             self._closing = False
             self.download_dir = (guiconfig.get_download_dir()
                                  or os.path.expanduser("~"))
 
+            # tk variables shared across (lazily built) sections
+            self.threads_var = tk.StringVar(value="4")
+            self.conc_var = tk.StringVar(value=str(guiconfig.get_concurrency()))
+            self.clip_var = tk.BooleanVar(value=guiconfig.get_clipboard_watch())
+
             self._set_icon()
             self._build_menu()
-            self._build_layout()
-            self._apply_theme()
+            self.add_section("queue", "Downloads", "↧", self._build_queue)
+            self.add_section("settings", "Settings", "⚙", self._build_settings)
+            self.add_section("about", "About", "◉", self._build_about)
+            self.show("queue")
             self._load_saved_queue()
+            self.set_status("Ready")
 
             self.protocol("WM_DELETE_WINDOW", self._on_close)
             self.after(POLL_MS, self._tick)
@@ -202,7 +203,7 @@ def build_app():
         def _set_icon(self):
             try:
                 ico = asset_path("grab-it.ico")
-                if ico:
+                if ico and os.name == "nt":
                     self.iconbitmap(ico)
                     return
             except Exception:
@@ -211,77 +212,12 @@ def build_app():
                 png = asset_path("grab-it.png")
                 if png:
                     img = tk.PhotoImage(file=png)
-                    self._img_refs.append(img)
+                    self._img_refs_gui.append(img)
                     self.iconphoto(True, img)
             except Exception:
                 pass  # icon is cosmetic; never block launch
 
-        # ---- theming
-        def _pal(self):
-            return PALETTES[self.theme]
-
-        def _apply_theme(self):
-            p = self._pal()
-            style = ttk.Style(self)
-            try:
-                style.theme_use("clam")
-            except Exception:
-                pass
-            self.configure(bg=p["bg"])
-            style.configure(".", background=p["bg"], foreground=p["text"],
-                            fieldbackground=p["entry"], bordercolor=p["border"],
-                            font=(FONT, 10))
-            style.configure("TFrame", background=p["bg"])
-            style.configure("Sidebar.TFrame", background=p["surface"])
-            style.configure("TLabel", background=p["bg"], foreground=p["text"])
-            style.configure("Muted.TLabel", background=p["bg"], foreground=p["muted"])
-            style.configure("Header.TLabel", background=p["bg"], foreground=p["text"],
-                            font=(FONT, 15, "bold"))
-            style.configure("Brand.TLabel", background=p["surface"],
-                            foreground=p["text"], font=(FONT, 13, "bold"))
-            style.configure("Status.TLabel", background=p["surface"],
-                            foreground=p["muted"])
-            style.configure("Ok.TLabel", background=p["surface"], foreground=p["ok"])
-            style.configure("Err.TLabel", background=p["surface"], foreground=p["err"])
-            style.configure("TButton", background=p["surface"], foreground=p["text"],
-                            bordercolor=p["border"], focuscolor=p["surface"],
-                            padding=(10, 5))
-            style.map("TButton",
-                      background=[("active", p["trough"]), ("disabled", p["bg"])],
-                      foreground=[("disabled", p["muted"])])
-            style.configure("Accent.TButton", background=p["primary"],
-                            foreground="#ffffff", padding=(12, 6))
-            style.map("Accent.TButton",
-                      background=[("active", p["primary_hi"]),
-                                  ("disabled", p["border"])],
-                      foreground=[("disabled", p["muted"])])
-            style.configure("Toggle.TButton", background=p["surface"],
-                            foreground=p["text"], padding=(8, 4))
-            for name in ("TEntry", "TSpinbox"):
-                style.configure(name, fieldbackground=p["entry"], foreground=p["text"],
-                                insertcolor=p["text"], bordercolor=p["border"])
-            style.configure("TCheckbutton", background=p["bg"], foreground=p["text"])
-            style.map("TCheckbutton", background=[("active", p["bg"])])
-            style.configure("Treeview", background=p["surface"],
-                            fieldbackground=p["surface"], foreground=p["text"],
-                            bordercolor=p["border"], rowheight=26)
-            style.configure("Treeview.Heading", background=p["surface"],
-                            foreground=p["muted"], font=(FONT, 10, "bold"))
-            style.map("Treeview", background=[("selected", p["primary"])],
-                      foreground=[("selected", p["sel_fg"])])
-            style.configure("TScrollbar", background=p["surface"],
-                            troughcolor=p["bg"], bordercolor=p["border"],
-                            arrowcolor=p["text"])
-            style.configure("TSeparator", background=p["border"])
-
-        def toggle_theme(self):
-            self.theme = "dark" if self.theme == "light" else "light"
-            guiconfig.set_theme(self.theme)
-            self._apply_theme()
-            self._theme_btn.configure(
-                text="☀ Light mode" if self.theme == "dark" else "🌙 Dark mode")
-
-        # ---- menu
+        # ---- menu (native menus stay; theme lives in the sidebar toggle too)
         def _build_menu(self):
             bar = tk.Menu(self)
             filem = tk.Menu(bar, tearoff=0)
@@ -296,114 +232,157 @@ def build_app():
             bar.add_cascade(label="File", menu=filem)
 
             viewm = tk.Menu(bar, tearoff=0)
-            viewm.add_command(label="Toggle dark mode", command=self.toggle_theme)
+            viewm.add_command(
+                label="Toggle dark mode",
+                command=lambda: self.set_theme(
+                    "light" if self.theme == "dark" else "dark"))
             bar.add_cascade(label="View", menu=viewm)
 
             helpm = tk.Menu(bar, tearoff=0)
-            helpm.add_command(label="About", command=self._about)
+            helpm.add_command(label="About",
+                              command=lambda: self.show("about"))
             helpm.add_command(label="Open project page (quickopen.ai)",
                               command=lambda: open_with_default_app(PROJECT_URL))
             bar.add_cascade(label="Help", menu=helpm)
             self.configure(menu=bar)
 
-        # ---- layout
-        def _build_layout(self):
-            # top brand bar
-            top = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 8))
-            top.pack(fill="x", side="top")
-            ttk.Label(top, text="GrabIt", style="Brand.TLabel").pack(side="left")
-            ttk.Label(top, style="Status.TLabel",
-                      text="  segmented downloads · resume · queue").pack(side="left")
-            self._theme_btn = ttk.Button(
-                top, style="Toggle.TButton", command=self.toggle_theme,
-                text="☀ Light mode" if self.theme == "dark" else "🌙 Dark mode")
-            self._theme_btn.pack(side="right")
+        # =================================================================
+        # Downloads section (the queue)
+        # =================================================================
+        def _build_queue(self, frame):
+            # add-URL bar
+            bar = ctk.CTkFrame(frame, fg_color="transparent")
+            bar.pack(fill="x", pady=(0, 12))
+            # no textvariable: CTkEntry placeholders only work without one
+            self.url_entry = aura.AuraEntry(
+                bar, placeholder="https:// URL to download…")
+            self.url_entry.pack(side="left", fill="x", expand=True)
+            self.url_entry.bind("<Return>", lambda _e: self._add_from_entry())
+            ctk.CTkLabel(bar, text="Segments",
+                         font=aura.font()).pack(side="left", padx=(12, 6))
+            ttk.Spinbox(bar, from_=1, to=16, width=4,
+                        textvariable=self.threads_var).pack(side="left",
+                                                            padx=(0, 12))
+            aura.AuraButton(bar, "Add",
+                            command=self._add_from_entry).pack(side="left")
 
-            # add-URL controls
-            add = ttk.Frame(self, style="TFrame", padding=(12, 10))
-            add.pack(fill="x")
-            ttk.Label(add, text="URL", width=5).pack(side="left")
-            self.url_var = tk.StringVar()
-            self.url_entry = ttk.Entry(add, textvariable=self.url_var)
-            self.url_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-            self.url_entry.bind("<Return>", lambda e: self._add_from_entry())
-            ttk.Label(add, text="Segments").pack(side="left")
-            self.threads_var = tk.StringVar(value="4")
-            ttk.Spinbox(add, from_=1, to=16, width=4,
-                        textvariable=self.threads_var).pack(side="left", padx=(4, 8))
-            ttk.Button(add, text="Add", style="Accent.TButton",
-                       command=self._add_from_entry).pack(side="left")
-
-            # second controls row
-            row2 = ttk.Frame(self, style="TFrame", padding=(12, 0))
-            row2.pack(fill="x")
-            ttk.Button(row2, text="Folder…",
-                       command=self._choose_folder).pack(side="left")
-            self.folder_lbl = ttk.Label(row2, style="Muted.TLabel",
-                                        text=self._folder_text())
-            self.folder_lbl.pack(side="left", padx=(6, 16))
-            ttk.Label(row2, text="Max concurrent").pack(side="left")
-            self.conc_var = tk.StringVar(value=str(guiconfig.get_concurrency()))
-            ttk.Spinbox(row2, from_=1, to=16, width=4, textvariable=self.conc_var,
-                        command=self._save_concurrency).pack(side="left", padx=(4, 16))
-            self.clip_var = tk.BooleanVar(value=guiconfig.get_clipboard_watch())
-            ttk.Checkbutton(row2, text="Watch clipboard for URLs",
-                            variable=self.clip_var,
-                            command=self._save_clipwatch).pack(side="left")
-
-            # queue table
-            mid = ttk.Frame(self, style="TFrame", padding=(12, 8))
-            mid.pack(fill="both", expand=True)
+            # queue table (per-row text progress bar stays; style_ttk skins it)
+            body = ctk.CTkFrame(frame, fg_color="transparent")
+            body.pack(fill="both", expand=True)
             self.tree = ttk.Treeview(
-                mid, columns=[c[0] for c in COLUMNS], show="headings",
+                body, columns=[c[0] for c in COLUMNS], show="headings",
                 selectmode="browse")
             for cid, label, width in COLUMNS:
-                self.tree.heading(cid, text=label)
+                self.tree.heading(cid, text=aura.spaced(label), anchor="w")
                 anchor = "w" if cid == "name" else "center"
                 self.tree.column(cid, width=width, anchor=anchor,
                                  stretch=(cid == "name"))
-            sb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
+            sb = ttk.Scrollbar(body, orient="vertical",
+                               command=self.tree.yview)
             self.tree.configure(yscrollcommand=sb.set)
             sb.pack(side="right", fill="y")
             self.tree.pack(side="left", fill="both", expand=True)
 
             # per-row actions
-            act = ttk.Frame(self, style="TFrame", padding=(12, 4))
-            act.pack(fill="x")
-            ttk.Button(act, text="Pause", command=self._pause_sel).pack(side="left")
-            ttk.Button(act, text="Resume", command=self._resume_sel).pack(side="left", padx=4)
-            ttk.Button(act, text="Cancel", command=self._cancel_sel).pack(side="left")
-            ttk.Button(act, text="Remove", command=self._remove_sel).pack(side="left", padx=4)
-            ttk.Button(act, text="Open folder",
-                       command=self._open_sel_folder).pack(side="left", padx=(12, 0))
-            ttk.Button(act, text="Clear finished",
-                       command=self._clear_finished).pack(side="right")
+            act = ctk.CTkFrame(frame, fg_color="transparent")
+            act.pack(fill="x", pady=(10, 0))
+            aura.AuraButton(act, "Pause", kind="secondary",
+                            command=self._pause_sel).pack(side="left")
+            aura.AuraButton(act, "Resume", kind="secondary",
+                            command=self._resume_sel).pack(side="left",
+                                                           padx=(8, 0))
+            aura.AuraButton(act, "Cancel", kind="secondary",
+                            command=self._cancel_sel).pack(side="left",
+                                                           padx=(8, 0))
+            aura.AuraButton(act, "Remove", kind="danger",
+                            command=self._remove_sel).pack(side="left",
+                                                           padx=(8, 0))
+            aura.AuraButton(act, "Clear finished", kind="ghost",
+                            command=self._clear_finished).pack(side="right")
 
-            # inline status / error bar
-            bar = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 6))
-            bar.pack(fill="x", side="bottom")
-            self.status_lbl = ttk.Label(bar, text="Ready", style="Status.TLabel")
-            self.status_lbl.pack(side="left")
-            self.summary_lbl = ttk.Label(bar, text="", style="Status.TLabel")
-            self.summary_lbl.pack(side="right")
+            # overall progress (0..1 — aggregate across the whole queue)
+            prog = ctk.CTkFrame(frame, fg_color="transparent")
+            prog.pack(fill="x", pady=(14, 0))
+            aura.SectionLabel(prog, "Overall progress").pack(anchor="w")
+            self.overall = aura.ProgressBar(prog)
+            self.overall.set(0)
+            self.overall.pack(fill="x", pady=(6, 4))
+            self.summary_lbl = aura.Caption(prog, "0 active · 0/0 done")
+            self.summary_lbl.pack(anchor="w")
+
+            # status-bar actions (built once; the section builder runs once)
+            aura.AuraButton(self.statusbar.actions, "Open folder",
+                            kind="secondary", height=30,
+                            command=self._open_sel_folder).pack(side="left")
+
+        # =================================================================
+        # Settings section
+        # =================================================================
+        def _build_settings(self, frame):
+            card = aura.Card(frame, title="Downloads")
+            card.pack(fill="x")
+
+            row1 = ctk.CTkFrame(card.body, fg_color="transparent")
+            row1.pack(fill="x", pady=(0, 10))
+            aura.AuraButton(row1, "Download folder…", kind="secondary",
+                            command=self._choose_folder).pack(side="left")
+            self.folder_lbl = ctk.CTkLabel(row1, font=aura.font(),
+                                           text=self._folder_text(),
+                                           anchor="w")
+            self.folder_lbl.pack(side="left", padx=(10, 0))
+
+            row2 = ctk.CTkFrame(card.body, fg_color="transparent")
+            row2.pack(fill="x", pady=(0, 10))
+            ctk.CTkLabel(row2, text="Max concurrent downloads",
+                         font=aura.font()).pack(side="left", padx=(0, 8))
+            ttk.Spinbox(row2, from_=1, to=16, width=4,
+                        textvariable=self.conc_var,
+                        command=self._save_concurrency).pack(side="left")
+
+            ctk.CTkCheckBox(card.body, text="Watch clipboard for URLs",
+                            variable=self.clip_var,
+                            command=self._save_clipwatch,
+                            font=aura.font()).pack(anchor="w")
+            aura.Caption(
+                card.body,
+                "Copied http(s) links are added to the queue "
+                "automatically while the app is open.").pack(
+                anchor="w", pady=(4, 0))
+
+        # =================================================================
+        # About section
+        # =================================================================
+        def _build_about(self, frame):
+            card = aura.Card(frame, title="About GrabIt")
+            card.pack(fill="x")
+            aura.Heading(card.body, APP_NAME).pack(anchor="w")
+            aura.Caption(card.body, f"Version {APP_VERSION}").pack(
+                anchor="w", pady=(0, 10))
+            ctk.CTkLabel(
+                card.body, font=aura.font(), justify="left", anchor="w",
+                wraplength=520,
+                text="A fast, open-source, multi-connection download manager. "
+                     "Segmented downloads, pause/resume, a persistent queue, "
+                     "checksum verification and clipboard-watch.\n\n"
+                     "100% AI-built, open source, published on "
+                     "QuickOpen.").pack(anchor="w")
+            aura.Caption(card.body,
+                         "Licensed under Apache-2.0. Built on "
+                         "CustomTkinter (MIT).").pack(anchor="w",
+                                                      pady=(10, 4))
+            aura.AuraButton(card.body, "Project page: quickopen.ai",
+                            kind="ghost",
+                            command=lambda: open_with_default_app(
+                                PROJECT_URL)).pack(anchor="w", pady=(6, 0))
 
         def _folder_text(self):
             d = self.download_dir or ""
             return d if len(d) < 60 else "…" + d[-57:]
 
-        # ---- status helpers
-        def _set_status(self, text, kind="idle"):
-            p = self._pal()
-            color = {"ok": p["ok"], "err": p["err"], "working": p["primary"]}.get(
-                kind, p["muted"])
-            self.status_lbl.configure(text=text, foreground=color)
-
-        def _error(self, message):
-            self._set_status("✕ " + message, kind="err")
-
         # ---- add / persistence
         def _focus_url(self):
             try:
+                self.show("queue")
                 self.url_entry.focus_set()
             except Exception:
                 pass
@@ -414,7 +393,10 @@ def build_app():
             if d:
                 self.download_dir = d
                 guiconfig.set_download_dir(d)
-                self.folder_lbl.configure(text=self._folder_text())
+                try:
+                    self.folder_lbl.configure(text=self._folder_text())
+                except Exception:
+                    pass  # settings section may not be built yet
 
         def _save_concurrency(self):
             try:
@@ -426,27 +408,29 @@ def build_app():
             guiconfig.set_clipboard_watch(bool(self.clip_var.get()))
 
         def _add_from_entry(self):
-            url = self.url_var.get().strip()
+            url = self.url_entry.get().strip()
             if not url:
-                self._error("Enter a URL to add.")
+                self.set_error("Enter a URL to add.")
                 return
             if not _looks_like_url(url):
-                self._error("That doesn't look like an http(s) URL.")
+                self.set_error("That doesn't look like an http(s) URL.")
                 return
             try:
                 threads = max(1, int(self.threads_var.get()))
             except (ValueError, TypeError):
                 threads = 1
             self._add_url(url, threads=threads)
-            self.url_var.set("")
+            self.url_entry.delete(0, "end")
 
         def _add_url(self, url, threads=1, sha256=None, requested=True):
-            dest = os.path.join(self.download_dir or ".", filename_from_url(url))
+            dest = os.path.join(self.download_dir or ".",
+                                filename_from_url(url))
             row = Row(url, dest, threads=threads, sha256=sha256)
             row.requested = requested
             self.rows.append(row)
-            row.iid = self.tree.insert("", "end", values=self._row_values(row))
-            self._set_status(f"Added {os.path.basename(dest)}", kind="ok")
+            row.iid = self.tree.insert("", "end",
+                                       values=self._row_values(row))
+            self.set_success(f"Added {os.path.basename(dest)}")
             self._persist()
 
         def _row_values(self, row):
@@ -526,6 +510,8 @@ def build_app():
             row = self._selected_row()
             if row:
                 open_in_file_manager(row.dest)
+            else:
+                open_in_file_manager(self.download_dir or ".")
 
         def _clear_finished(self):
             keep = []
@@ -581,6 +567,17 @@ def build_app():
             total = len(self.rows)
             self.summary_lbl.configure(
                 text=f"{running} active · {done}/{total} done")
+            # overall bar: mean per-row fraction, 0..1 (aura scale)
+            if total:
+                frac = 0.0
+                for r in self.rows:
+                    if r.state == DONE:
+                        frac += 1.0
+                    elif r.dl is not None:
+                        frac += max(0.0, min(1.0, r.dl.progress))
+                self.overall.set(frac / total)
+            else:
+                self.overall.set(0)
 
         def _watch_clipboard(self):
             if not self.clip_var.get():
@@ -621,17 +618,6 @@ def build_app():
             except Exception:
                 pass
 
-        # ---- About
-        def _about(self):
-            messagebox.showinfo(
-                "About GrabIt",
-                f"GrabIt {APP_VERSION}\n\n"
-                "A fast, open-source, multi-connection download manager.\n"
-                "Segmented downloads, pause/resume, a persistent queue,\n"
-                "checksum verification and clipboard-watch.\n\n"
-                "100% AI-built, open source, published on QuickOpen.\n"
-                "Licensed under Apache-2.0.")
-
         # ---- shutdown
         def _on_close(self):
             self._closing = True
@@ -651,8 +637,9 @@ def main():
     """Entry point: build the root window and run.  Degrades on headless hosts.
 
     Importing this module does nothing; only this function creates a Tk root.
-    With no display (e.g. a server) it prints a friendly note and returns 0
-    instead of raising, so the frozen exe never crashes on a headless box.
+    With no display (e.g. a server) or without customtkinter installed, it
+    prints a friendly note and returns 0 instead of raising, so the frozen exe
+    never crashes on a headless box.
     """
     try:
         import tkinter as tk
@@ -670,6 +657,10 @@ def main():
     try:
         App = build_app()
         app = App()
+    except ImportError as exc:
+        print(f"{APP_NAME}: the GUI needs the 'customtkinter' package "
+              f"({exc}). Install it with:  pip install customtkinter")
+        return 0
     except tk.TclError as exc:
         print(f"{APP_NAME}: no graphical display available — cannot start the "
               f"GUI here ({exc}). This app is intended for the Windows desktop.")
