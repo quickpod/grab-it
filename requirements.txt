@@ -1,0 +1,2 @@
+# GrabIt runtime deps — permissive/weak-copyleft only, no AGPL/proprietary.
+requests>=2.28
